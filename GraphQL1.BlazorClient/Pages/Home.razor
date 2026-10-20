@@ -1,0 +1,178 @@
+@page "/"
+@using System.Net.Http.Headers
+@inject HttpClient Http
+
+<PageTitle>GraphQL Explorer</PageTitle>
+
+<div class="page-heading">
+    <div>
+        <div class="eyebrow">API WORKSPACE</div>
+        <h1>GraphQL Explorer</h1>
+        <p class="muted">Отправляйте Query или Mutation в свой GraphQL API и просматривайте ответ.</p>
+    </div>
+    <div class="status-chip"><span class="status-dot"></span> Клиент готов</div>
+</div>
+
+<section class="endpoint-card">
+    <label for="endpoint">GraphQL endpoint</label>
+    <div class="endpoint-row">
+        <input id="endpoint" class="endpoint-input" @bind="Endpoint" placeholder="https://localhost:7001/graphql" />
+        <button class="secondary-button" @onclick="ResetExample">Сбросить пример</button>
+    </div>
+    <small>Укажите адрес GraphQL endpoint вашего проекта. Значение используется только в текущем сеансе.</small>
+</section>
+
+<div class="workspace">
+    <section class="panel query-panel">
+        <div class="panel-heading">
+            <div><span class="panel-index">01</span><h2>Запрос</h2></div>
+            <select @bind="OperationType" aria-label="Тип операции">
+                <option value="query">Query</option>
+                <option value="mutation">Mutation</option>
+            </select>
+        </div>
+        <label for="query">GraphQL document</label>
+        <textarea id="query" class="code-editor" spellcheck="false" @bind="Query" rows="13"></textarea>
+        <div class="variables-heading">
+            <label for="variables">Variables <span class="optional">JSON · необязательно</span></label>
+        </div>
+        <textarea id="variables" class="variables-editor" spellcheck="false" @bind="Variables" rows="4" placeholder="{ }"></textarea>
+        <div class="actions-row">
+            <span class="hint">POST · application/json</span>
+            <button class="run-button" @onclick="SendAsync" disabled="@IsLoading">
+                @if (IsLoading) { <span class="spinner"></span><span>Выполняется…</span> }
+                else { <span>▶</span><span>Выполнить запрос</span> }
+            </button>
+        </div>
+    </section>
+
+    <section class="panel response-panel">
+        <div class="panel-heading">
+            <div><span class="panel-index">02</span><h2>Ответ API</h2></div>
+            @if (HasResponse)
+            {
+                <span class="response-badge @(IsError ? "error-badge" : "success-badge")">@(IsError ? "ОШИБКА" : "ПОЛУЧЕН")</span>
+            }
+        </div>
+        <div class="response-meta">
+            <span class="meta-label">RESPONSE BODY</span>
+            @if (ElapsedMs.HasValue) { <span>@ElapsedMs.Value ms</span> }
+        </div>
+        <pre class="response-output">@ResponseText</pre>
+        @if (!string.IsNullOrWhiteSpace(ErrorMessage))
+        {
+            <div class="error-box"><strong>Не удалось выполнить запрос</strong><p>@ErrorMessage</p>
+                <small>Проверьте endpoint, доступность сервера и настройки CORS на стороне API.</small>
+            </div>
+        }
+        else if (!HasResponse)
+        {
+            <div class="empty-state">
+                <div class="empty-icon">{ }</div>
+                <strong>Ответ появится здесь</strong>
+                <p>Введите адрес API и нажмите «Выполнить запрос».</p>
+            </div>
+        }
+    </section>
+</div>
+
+<section class="tips">
+    <div class="tip-icon">i</div>
+    <div><strong>Важно для подключения</strong><p>Blazor WebAssembly выполняет запрос из браузера. Если API находится на другом домене или порту, сервер должен разрешать CORS для адреса этого клиента. Названия полей в Query/Mutation должны соответствовать схеме вашей курсовой работы.</p></div>
+</section>
+
+@code {
+    private string Endpoint { get; set; } = "https://localhost:7001/graphql";
+    private string OperationType { get; set; } = "query";
+    private string Query { get; set; } = "query {\n  __typename\n}";
+    private string Variables { get; set; } = "{}";
+    private string ResponseText { get; set; } = "// Здесь отобразится ответ GraphQL";
+    private string? ErrorMessage { get; set; }
+    private bool IsLoading { get; set; }
+    private bool HasResponse { get; set; }
+    private bool IsError { get; set; }
+    private long? ElapsedMs { get; set; }
+
+    private async Task SendAsync()
+    {
+        ErrorMessage = null;
+        IsLoading = true;
+        IsError = false;
+        HasResponse = false;
+        ElapsedMs = null;
+        var timer = System.Diagnostics.Stopwatch.StartNew();
+
+        try
+        {
+            if (!Uri.TryCreate(Endpoint.Trim(), UriKind.Absolute, out var uri) ||
+                (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+                throw new InvalidOperationException("Введите корректный абсолютный URL, начинающийся с http:// или https://.");
+
+            using var variablesDocument = JsonDocument.Parse(string.IsNullOrWhiteSpace(Variables) ? "{}" : Variables);
+            if (variablesDocument.RootElement.ValueKind != JsonValueKind.Object)
+                throw new InvalidOperationException("Variables должны быть JSON-объектом, например {}.");
+
+            var payload = new
+            {
+                query = Query,
+                operationName = (string?)null,
+                variables = variablesDocument.RootElement
+            };
+            using var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+            using var response = await Http.PostAsync(uri, content);
+            var body = await response.Content.ReadAsStringAsync();
+            timer.Stop();
+            ElapsedMs = timer.ElapsedMilliseconds;
+
+            try
+            {
+                using var document = JsonDocument.Parse(body);
+                ResponseText = JsonSerializer.Serialize(document.RootElement, new JsonSerializerOptions { WriteIndented = true });
+                IsError = !response.IsSuccessStatusCode || document.RootElement.TryGetProperty("errors", out _);
+            }
+            catch (JsonException)
+            {
+                ResponseText = body;
+                IsError = !response.IsSuccessStatusCode;
+            }
+
+            if (!response.IsSuccessStatusCode)
+                ErrorMessage = $"HTTP {(int)response.StatusCode} ({response.ReasonPhrase}). Подробности см. в ответе API.";
+            HasResponse = true;
+        }
+        catch (JsonException ex)
+        {
+            ErrorMessage = $"Некорректный JSON в Variables: {ex.Message}";
+            ResponseText = "// Запрос не отправлен";
+            IsError = true;
+        }
+        catch (HttpRequestException ex)
+        {
+            ErrorMessage = $"{ex.Message} Если в браузере указана ошибка CORS, настройте CORS в GraphQL API.";
+            ResponseText = "// Нет ответа от сервера";
+            IsError = true;
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = ex.Message;
+            ResponseText = "// Запрос не отправлен";
+            IsError = true;
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    private void ResetExample()
+    {
+        OperationType = "query";
+        Query = "query {\n  __typename\n}";
+        Variables = "{}";
+        ResponseText = "// Здесь отобразится ответ GraphQL";
+        ErrorMessage = null;
+        HasResponse = false;
+        IsError = false;
+        ElapsedMs = null;
+    }
+}
